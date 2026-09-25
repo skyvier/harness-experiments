@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { extractText } from "../src/harness.js";
+import { extractText } from "../src/agent.js";
 
 describe("extractText", () => {
   it("returns a plain-text response", () => {

@@ -1,11 +1,10 @@
 import { Mistral } from "@mistralai/mistralai";
 
+import { runAgent } from "./agent.js";
+import type { AgentModel } from "./agent.js";
 import type { HarnessConfig } from "./config.js";
 
-const SYSTEM_PROMPT =
-  "You are a concise, helpful assistant. State uncertainty instead of inventing facts.";
-
-/** Sends one prompt to Mistral's EU-hosted inference endpoint. */
+/** Runs the agent loop using Mistral's EU-hosted inference endpoint. */
 export async function generateText(
   prompt: string,
   config: HarnessConfig,
@@ -15,41 +14,24 @@ export async function generateText(
     server: "eu",
   });
 
-  const response = await client.chat.complete({
-    model: config.model,
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: prompt },
-    ],
-  });
+  const model: AgentModel = {
+    async complete(messages, tools) {
+      const response = await client.chat.complete({
+        model: config.model,
+        messages: [...messages],
+        tools: [...tools],
+        toolChoice: "auto",
+        parallelToolCalls: false,
+      });
+      const message = response?.choices?.[0]?.message;
 
-  return extractText(response?.choices?.[0]?.message?.content);
-}
+      if (!message) {
+        throw new Error("Mistral returned no assistant message.");
+      }
 
-/** Normalizes the SDK's string-or-content-chunks response into displayable text. */
-export function extractText(content: unknown): string {
-  const text =
-    typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? content
-            .filter(isTextChunk)
-            .map((chunk) => chunk.text)
-            .join("")
-        : "";
+      return message;
+    },
+  };
 
-  if (!text.trim()) {
-    throw new Error("Mistral returned no text content.");
-  }
-
-  return text;
-}
-
-function isTextChunk(value: unknown): value is { readonly text: string } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "text" in value &&
-    typeof value.text === "string"
-  );
+  return runAgent(prompt, model);
 }

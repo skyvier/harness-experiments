@@ -1,7 +1,7 @@
 # AI harness experiment
 
-A minimal TypeScript CLI that sends one prompt to Mistral and prints the
-response. Inference is pinned to Mistral's EU endpoint.
+A minimal TypeScript agent that can call a validated calculator tool before
+returning its answer. Inference is pinned to Mistral's EU endpoint.
 
 ## Development environment
 
@@ -44,5 +44,6 @@ npm test
 npm run check
 ```
 
-This first prototype is intentionally stateless: it makes one chat-completion
-request, has no tools, and does not retain conversation history.
+The prototype is intentionally stateless between CLI invocations. Within one
+invocation, it runs a bounded five-step agent loop and exposes one allowlisted
+calculator tool.

@@ -12,7 +12,8 @@
     "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {
-    "@mistralai/mistralai": "^2.7.0"
+    "@mistralai/mistralai": "^2.7.0",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",

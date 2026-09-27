@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { z } from "zod";
 
-import { runAgent } from "../src/agent.js";
+import { AgentSession, runAgent } from "../src/agent.js";
 import type { AgentModel, ToolCallEvent } from "../src/agent.js";
 import { createToolRegistry, defineTool } from "../src/tool.js";
 
@@ -211,5 +211,69 @@ describe("runAgent", () => {
       () => runAgent("Keep calculating", model, { maxSteps: 2 }),
       /2-step limit/,
     );
+  });
+});
+
+describe("AgentSession", () => {
+  it("includes completed turns in subsequent model requests", async () => {
+    const requests: Parameters<AgentModel["complete"]>[0][] = [];
+    const responses = [
+      { content: "My name is Harness." },
+      { content: "I said my name is Harness." },
+    ];
+    const model: AgentModel = {
+      async complete(messages) {
+        requests.push([...messages]);
+        const response = responses.shift();
+        assert.ok(response);
+        return response;
+      },
+    };
+    const session = new AgentSession(model);
+
+    await session.send("What is your name?");
+    await session.send("What name did you just give?");
+
+    assert.deepEqual(requests[1]?.slice(1), [
+      { role: "user", content: "What is your name?" },
+      { role: "assistant", content: "My name is Harness." },
+      { role: "user", content: "What name did you just give?" },
+    ]);
+  });
+
+  it("discards every message from a failed turn", async () => {
+    const requests: Parameters<AgentModel["complete"]>[0][] = [];
+    let completion = 0;
+    const model: AgentModel = {
+      async complete(messages) {
+        requests.push([...messages]);
+        completion += 1;
+        if (completion === 1) {
+          return {
+            toolCalls: [
+              {
+                id: "failed-call",
+                function: {
+                  name: "calculate",
+                  arguments: { operation: "add", left: 1, right: 1 },
+                },
+              },
+            ],
+          };
+        }
+        if (completion === 2) {
+          throw new Error("model unavailable");
+        }
+        return { content: "Recovered." };
+      },
+    };
+    const session = new AgentSession(model);
+
+    await assert.rejects(() => session.send("Failed prompt"), /unavailable/);
+    assert.equal(await session.send("Fresh prompt"), "Recovered.");
+
+    assert.deepEqual(requests[2]?.slice(1), [
+      { role: "user", content: "Fresh prompt" },
+    ]);
   });
 });

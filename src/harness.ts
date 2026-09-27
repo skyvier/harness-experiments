@@ -1,6 +1,6 @@
 import { Mistral } from "@mistralai/mistralai";
 
-import { runAgent } from "./agent.js";
+import { AgentSession } from "./agent.js";
 import type { AgentModel } from "./agent.js";
 import type { HarnessConfig } from "./config.js";
 
@@ -9,6 +9,11 @@ export async function generateText(
   prompt: string,
   config: HarnessConfig,
 ): Promise<string> {
+  return createAgentSession(config).send(prompt);
+}
+
+/** Creates a stateful agent session backed by Mistral inference. */
+export function createAgentSession(config: HarnessConfig): AgentSession {
   const client = new Mistral({
     apiKey: config.apiKey,
     server: "eu",
@@ -33,7 +38,7 @@ export async function generateText(
     },
   };
 
-  return runAgent(prompt, model, {
+  return new AgentSession(model, {
     onToolCall: ({ name, arguments: arguments_, result, error }) => {
       const outcome =
         error === undefined

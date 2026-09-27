@@ -49,4 +49,5 @@ npm run check
 
 The prototype is intentionally stateless between CLI invocations. Within one
 invocation, it runs a bounded five-step agent loop and exposes one allowlisted
-calculator tool.
+calculator tool. Validation and execution failures are returned to the model as
+tool results, allowing it to explain the failure or retry with a corrected call.

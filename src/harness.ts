@@ -34,9 +34,10 @@ export async function generateText(
   };
 
   return runAgent(prompt, model, {
-    onToolCall: ({ name, arguments: arguments_, result }) => {
+    onToolCall: ({ name, arguments: arguments_, result, error }) => {
+      const outcome = error === undefined ? `-> ${result}` : `failed: ${error}`;
       process.stderr.write(
-        `[tool] ${name} ${JSON.stringify(arguments_)} -> ${result}\n`,
+        `[tool] ${name} ${JSON.stringify(arguments_)} ${outcome}\n`,
       );
     },
   });

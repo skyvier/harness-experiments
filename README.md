@@ -1,7 +1,7 @@
 # AI harness experiment
 
-A minimal TypeScript agent that can call a validated calculator tool before
-returning its answer. Inference is pinned to Mistral's EU endpoint.
+A minimal TypeScript agent that can call validated calculator and weather tools
+before returning its answer. Inference is pinned to Mistral's EU endpoint.
 
 ## Development environment
 
@@ -35,6 +35,7 @@ the inexpensive `ministral-8b-latest` model.
 
 ```sh
 npm start -- "Explain what an AI harness is in two sentences."
+npm start -- "What is the weather at latitude 60.17 and longitude 24.94?"
 ```
 
 Executed tool calls are logged to stderr, while the final answer is written to
@@ -48,8 +49,12 @@ npm run check
 ```
 
 The prototype is intentionally stateless between CLI invocations. Within one
-invocation, it runs a bounded five-step agent loop and exposes one allowlisted
-calculator tool. Validation and execution failures are returned to the model as
+invocation, it runs a bounded five-step agent loop and exposes allowlisted
+calculator and current-weather tools. Weather observations come from the
+[Finnish Meteorological Institute's open data](https://en.ilmatieteenlaitos.fi/open-data)
+under its stated Creative Commons licence. FMI responses are validated before
+they enter application logic, and only normalized numeric observations are sent
+to the model. Validation and execution failures are returned to the model as
 tool results, allowing it to explain the failure or retry with a corrected call.
-Tools may map recognized failures to safe descriptions; all other exceptions are
-replaced with a generic error before entering the model context.
+Tools may map recognized failures to safe descriptions; all other exceptions
+are replaced with a generic error before entering the model context.

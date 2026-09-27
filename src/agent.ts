@@ -8,15 +8,20 @@ import type {
 import { calculatorAgentTool } from "./calculator.js";
 import { createToolRegistry } from "./tool.js";
 import type { ToolFailure, ToolRegistry } from "./tool.js";
+import { weatherAgentTool } from "./weather.js";
 
 const SYSTEM_PROMPT = [
   "You are a concise, helpful assistant.",
   "Use the calculate tool for arithmetic.",
+  "Use the get_weather tool for current weather when the user provides coordinates in Finland.",
   "If a tool fails, correct the call when possible; otherwise explain the failure.",
   "State uncertainty instead of inventing facts.",
 ].join(" ");
 const MAX_STEPS = 5;
-const DEFAULT_TOOL_REGISTRY = createToolRegistry([calculatorAgentTool]);
+const DEFAULT_TOOL_REGISTRY = createToolRegistry([
+  calculatorAgentTool,
+  weatherAgentTool,
+]);
 
 /** An attempted tool call exposed for tracing and diagnostics. */
 export interface ToolCallEvent {

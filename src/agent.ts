@@ -7,7 +7,7 @@ import type {
 
 import { calculatorAgentTool } from "./calculator.js";
 import { createToolRegistry } from "./tool.js";
-import type { ToolRegistry } from "./tool.js";
+import type { ToolFailure, ToolRegistry } from "./tool.js";
 
 const SYSTEM_PROMPT = [
   "You are a concise, helpful assistant.",
@@ -23,7 +23,7 @@ export interface ToolCallEvent {
   readonly name: string;
   readonly arguments: unknown;
   readonly result: string;
-  readonly error?: string;
+  readonly error?: ToolFailure;
 }
 
 /** Optional controls for one agent-loop invocation. */
@@ -75,18 +75,14 @@ export async function runAgent(
         throw new Error("Mistral returned a tool call without an id.");
       }
 
-      let result: string;
-      let error: string | undefined;
-
-      try {
-        result = await toolRegistry.execute(
-          toolCall.function.name,
-          toolCall.function.arguments,
-        );
-      } catch (cause: unknown) {
-        error = describeToolFailure(cause);
-        result = JSON.stringify({ error });
-      }
+      const execution = await toolRegistry.execute(
+        toolCall.function.name,
+        toolCall.function.arguments,
+      );
+      const error = execution.ok ? undefined : execution.failure;
+      const result = execution.ok
+        ? execution.result
+        : JSON.stringify({ error: execution.failure });
 
       onToolCall?.({
         name: toolCall.function.name,
@@ -105,11 +101,6 @@ export async function runAgent(
   }
 
   throw new Error(`Agent exceeded its ${maxSteps}-step limit.`);
-}
-
-/** Produces a model-readable failure without exposing an exception stack. */
-function describeToolFailure(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown tool failure.";
 }
 
 /** Extracts displayable text from content already validated by the model SDK. */

@@ -51,3 +51,5 @@ The prototype is intentionally stateless between CLI invocations. Within one
 invocation, it runs a bounded five-step agent loop and exposes one allowlisted
 calculator tool. Validation and execution failures are returned to the model as
 tool results, allowing it to explain the failure or retry with a corrected call.
+Tools may map recognized failures to safe descriptions; all other exceptions are
+replaced with a generic error before entering the model context.

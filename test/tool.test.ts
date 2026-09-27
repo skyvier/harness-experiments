@@ -14,11 +14,21 @@ describe("tool registry", () => {
     });
     const registry = createToolRegistry([echo]);
 
-    assert.equal(await registry.execute("echo", '{"text":"hello"}'), "hello");
-    await assert.rejects(() => registry.execute("echo", { text: 42 }));
+    assert.deepEqual(await registry.execute("echo", '{"text":"hello"}'), {
+      ok: true,
+      result: "hello",
+    });
+    assert.deepEqual(await registry.execute("echo", { text: 42 }), {
+      ok: false,
+      failure: {
+        code: "tool_error",
+        message: "The tool encountered an error.",
+        retryable: false,
+      },
+    });
   });
 
-  it("rejects unknown and duplicate tool names", async () => {
+  it("hides unknown tools and rejects duplicate names", async () => {
     const noop = defineTool({
       name: "noop",
       description: "Do nothing.",
@@ -27,9 +37,73 @@ describe("tool registry", () => {
     });
 
     assert.throws(() => createToolRegistry([noop, noop]), /Duplicate tool/);
-    await assert.rejects(
-      () => createToolRegistry([noop]).execute("missing", {}),
-      /Unknown tool/,
+    assert.deepEqual(
+      await createToolRegistry([noop]).execute("missing", {}),
+      {
+        ok: false,
+        failure: {
+          code: "tool_error",
+          message: "The tool encountered an error.",
+          retryable: false,
+        },
+      },
     );
+  });
+
+  it("uses a tool-owned mapping for recognized failures", async () => {
+    const lookup = defineTool({
+      name: "lookup",
+      description: "Look up data.",
+      argumentsSchema: z.object({}).strict(),
+      execute: () => {
+        throw new Error("upstream response contained secret-123");
+      },
+      mapError: (error) =>
+        error instanceof Error
+          ? {
+              code: "service_unavailable",
+              message: "The lookup service is temporarily unavailable.",
+              retryable: true,
+            }
+          : undefined,
+    });
+
+    const result = await createToolRegistry([lookup]).execute("lookup", {});
+
+    assert.deepEqual(result, {
+      ok: false,
+      failure: {
+        code: "service_unavailable",
+        message: "The lookup service is temporarily unavailable.",
+        retryable: true,
+      },
+    });
+    assert.doesNotMatch(JSON.stringify(result), /secret-123/);
+  });
+
+  it("uses the generic failure when a tool error mapper fails", async () => {
+    const broken = defineTool({
+      name: "broken",
+      description: "Fail unsafely.",
+      argumentsSchema: z.object({}).strict(),
+      execute: () => {
+        throw new Error("private failure details");
+      },
+      mapError: () => {
+        throw new Error("broken mapper details");
+      },
+    });
+
+    const result = await createToolRegistry([broken]).execute("broken", {});
+
+    assert.deepEqual(result, {
+      ok: false,
+      failure: {
+        code: "tool_error",
+        message: "The tool encountered an error.",
+        retryable: false,
+      },
+    });
+    assert.doesNotMatch(JSON.stringify(result), /private|broken mapper/);
   });
 });

@@ -35,7 +35,10 @@ export async function generateText(
 
   return runAgent(prompt, model, {
     onToolCall: ({ name, arguments: arguments_, result, error }) => {
-      const outcome = error === undefined ? `-> ${result}` : `failed: ${error}`;
+      const outcome =
+        error === undefined
+          ? `-> ${result}`
+          : `failed [${error.code}]: ${error.message}`;
       process.stderr.write(
         `[tool] ${name} ${JSON.stringify(arguments_)} ${outcome}\n`,
       );

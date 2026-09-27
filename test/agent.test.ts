@@ -112,10 +112,13 @@ describe("runAgent", () => {
     });
 
     assert.equal(result, "One divided by two is 0.5.");
-    assert.match(
-      String(requests[1]?.at(-1)?.content),
-      /Cannot divide by zero/,
-    );
+    assert.deepEqual(requests[1]?.at(-1), {
+      role: "tool",
+      name: "calculate",
+      toolCallId: "call-1",
+      content:
+        '{"error":{"code":"tool_error","message":"The tool encountered an error.","retryable":false}}',
+    });
     assert.deepEqual(requests[2]?.at(-1), {
       role: "tool",
       name: "calculate",
@@ -123,7 +126,11 @@ describe("runAgent", () => {
       content: '{"result":0.5}',
     });
     assert.equal(toolCalls.length, 2);
-    assert.match(toolCalls[0]?.error ?? "", /Cannot divide by zero/);
+    assert.deepEqual(toolCalls[0]?.error, {
+      code: "tool_error",
+      message: "The tool encountered an error.",
+      retryable: false,
+    });
   });
 
   it("returns executor failures to the model", async () => {
@@ -132,8 +139,13 @@ describe("runAgent", () => {
       description: "Always fail.",
       argumentsSchema: z.object({}).strict(),
       execute: () => {
-        throw new Error("Service unavailable");
+        throw new Error("upstream included private-token-123");
       },
+      mapError: () => ({
+        code: "service_unavailable",
+        message: "The service is temporarily unavailable.",
+        retryable: true,
+      }),
     });
     const requests: Parameters<AgentModel["complete"]>[0][] = [];
     const responses = [
@@ -165,8 +177,13 @@ describe("runAgent", () => {
       role: "tool",
       name: "fail",
       toolCallId: "call-1",
-      content: '{"error":"Service unavailable"}',
+      content:
+        '{"error":{"code":"service_unavailable","message":"The service is temporarily unavailable.","retryable":true}}',
     });
+    assert.doesNotMatch(
+      String(requests[1]?.at(-1)?.content),
+      /private-token-123/,
+    );
   });
 
   it("stops a model that never produces a final answer", async () => {

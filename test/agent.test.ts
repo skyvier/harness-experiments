@@ -7,6 +7,7 @@ import type { AgentModel } from "../src/agent.js";
 describe("runAgent", () => {
   it("executes a calculator call and returns the final answer", async () => {
     const requests: Parameters<AgentModel["complete"]>[0][] = [];
+    const toolCalls: unknown[] = [];
     const responses = [
       {
         toolCalls: [
@@ -34,7 +35,9 @@ describe("runAgent", () => {
       },
     };
 
-    const result = await runAgent("What is 137 * 42?", model);
+    const result = await runAgent("What is 137 * 42?", model, {
+      onToolCall: (event) => toolCalls.push(event),
+    });
 
     assert.equal(result, "137 multiplied by 42 is 5754.");
     assert.equal(requests.length, 2);
@@ -44,6 +47,17 @@ describe("runAgent", () => {
       toolCallId: "call-1",
       content: '{"result":5754}',
     });
+    assert.deepEqual(toolCalls, [
+      {
+        name: "calculate",
+        arguments: {
+          operation: "multiply",
+          left: 137,
+          right: 42,
+        },
+        result: '{"result":5754}',
+      },
+    ]);
   });
 
   it("rejects invalid tool arguments", async () => {
@@ -92,7 +106,7 @@ describe("runAgent", () => {
     };
 
     await assert.rejects(
-      () => runAgent("Keep calculating", model, 2),
+      () => runAgent("Keep calculating", model, { maxSteps: 2 }),
       /2-step limit/,
     );
   });

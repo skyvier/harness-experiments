@@ -37,6 +37,9 @@ the inexpensive `ministral-8b-latest` model.
 npm start -- "Explain what an AI harness is in two sentences."
 ```
 
+Executed tool calls are logged to stderr, while the final answer is written to
+stdout.
+
 ## Verify
 
 ```sh

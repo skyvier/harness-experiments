@@ -1,5 +1,6 @@
-import type { ChatCompletionRequestTool } from "@mistralai/mistralai/models/components";
 import { z } from "zod";
+
+import { defineTool } from "./tool.js";
 
 const calculatorArgumentsSchema = z
   .object({
@@ -17,46 +18,38 @@ const calculatorArgumentsSchema = z
       });
     }
   });
+type CalculatorArguments = z.infer<typeof calculatorArgumentsSchema>;
 
-export const calculatorTool = {
-  type: "function",
-  function: {
-    name: "calculate",
-    description: "Perform arithmetic on two numbers.",
-    strict: true,
-    parameters: z.toJSONSchema(calculatorArgumentsSchema),
+export const calculatorAgentTool = defineTool({
+  name: "calculate",
+  description: "Perform arithmetic on two numbers.",
+  argumentsSchema: calculatorArgumentsSchema,
+  execute(arguments_: CalculatorArguments): string {
+    return JSON.stringify({ result: calculate(arguments_) });
   },
-} satisfies ChatCompletionRequestTool;
+});
+
+export const calculatorTool = calculatorAgentTool.definition;
 
 /** Validates model-provided arguments and executes the calculator tool. */
 export function executeCalculator(arguments_: unknown): string {
-  const parsed = calculatorArgumentsSchema.parse(parseArguments(arguments_));
-  const { operation, left, right } = parsed;
-
-  const result = (() => {
-    switch (operation) {
-      case "add":
-        return left + right;
-      case "subtract":
-        return left - right;
-      case "multiply":
-        return left * right;
-      case "divide":
-        return left / right;
-    }
-  })();
-
-  return JSON.stringify({ result });
+  return calculatorAgentTool.execute(arguments_);
 }
 
-function parseArguments(arguments_: unknown): unknown {
-  if (typeof arguments_ !== "string") {
-    return arguments_;
-  }
-
-  try {
-    return JSON.parse(arguments_);
-  } catch (error: unknown) {
-    throw new Error("Calculator arguments are not valid JSON.", { cause: error });
+/** Applies a validated arithmetic operation. */
+function calculate({
+  operation,
+  left,
+  right,
+}: CalculatorArguments): number {
+  switch (operation) {
+    case "add":
+      return left + right;
+    case "subtract":
+      return left - right;
+    case "multiply":
+      return left * right;
+    case "divide":
+      return left / right;
   }
 }

@@ -5,7 +5,9 @@ import type {
   ChatCompletionRequestTool,
 } from "@mistralai/mistralai/models/components";
 
-import { calculatorTool, executeCalculator } from "./calculator.js";
+import { calculatorAgentTool } from "./calculator.js";
+import { createToolRegistry } from "./tool.js";
+import type { ToolRegistry } from "./tool.js";
 
 const SYSTEM_PROMPT = [
   "You are a concise, helpful assistant.",
@@ -13,6 +15,21 @@ const SYSTEM_PROMPT = [
   "State uncertainty instead of inventing facts.",
 ].join(" ");
 const MAX_STEPS = 5;
+const DEFAULT_TOOL_REGISTRY = createToolRegistry([calculatorAgentTool]);
+
+/** A successfully executed tool call exposed for tracing and diagnostics. */
+export interface ToolCallEvent {
+  readonly name: string;
+  readonly arguments: unknown;
+  readonly result: string;
+}
+
+/** Optional controls for one agent-loop invocation. */
+export interface AgentOptions {
+  readonly maxSteps?: number;
+  readonly onToolCall?: (event: ToolCallEvent) => void;
+  readonly toolRegistry?: ToolRegistry;
+}
 
 /** Boundary implemented by an LLM provider adapter. */
 export interface AgentModel {
@@ -26,16 +43,22 @@ export interface AgentModel {
 export async function runAgent(
   prompt: string,
   model: AgentModel,
-  maxSteps = MAX_STEPS,
+  options: AgentOptions | number = {},
 ): Promise<string> {
+  const normalizedOptions =
+    typeof options === "number" ? { maxSteps: options } : options;
+  const {
+    maxSteps = MAX_STEPS,
+    onToolCall,
+    toolRegistry = DEFAULT_TOOL_REGISTRY,
+  } = normalizedOptions;
   const messages: ChatCompletionRequestMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: prompt },
   ];
-  const tools = [calculatorTool];
 
   for (let step = 0; step < maxSteps; step += 1) {
-    const response = await model.complete(messages, tools);
+    const response = await model.complete(messages, toolRegistry.definitions);
     const toolCalls = response.toolCalls ?? [];
 
     if (toolCalls.length === 0) {
@@ -50,15 +73,21 @@ export async function runAgent(
         throw new Error("Mistral returned a tool call without an id.");
       }
 
-      if (toolCall.function.name !== "calculate") {
-        throw new Error(`Unknown tool: ${toolCall.function.name}`);
-      }
+      const result = await toolRegistry.execute(
+        toolCall.function.name,
+        toolCall.function.arguments,
+      );
+      onToolCall?.({
+        name: toolCall.function.name,
+        arguments: toolCall.function.arguments,
+        result,
+      });
 
       messages.push({
         role: "tool",
         name: toolCall.function.name,
         toolCallId,
-        content: executeCalculator(toolCall.function.arguments),
+        content: result,
       });
     }
   }

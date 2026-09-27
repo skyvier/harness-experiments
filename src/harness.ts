@@ -33,5 +33,11 @@ export async function generateText(
     },
   };
 
-  return runAgent(prompt, model);
+  return runAgent(prompt, model, {
+    onToolCall: ({ name, arguments: arguments_, result }) => {
+      process.stderr.write(
+        `[tool] ${name} ${JSON.stringify(arguments_)} -> ${result}\n`,
+      );
+    },
+  });
 }

@@ -1,8 +1,13 @@
 import { existsSync } from "node:fs";
 import { loadEnvFile } from "node:process";
 
-import { readConfig } from "./config.js";
-import { createAgentSession, generateText } from "./harness.js";
+import { parseCliArguments } from "./cli-arguments.js";
+import { readConfig, readPersistenceConfig } from "./config.js";
+import {
+  createAgentSession,
+  createDurableAgentSession,
+  generateText,
+} from "./harness.js";
 import { runInteractiveChat } from "./interactive-chat.js";
 
 /** Runs interactive chat or a single prompt supplied as command-line arguments. */
@@ -11,7 +16,9 @@ async function main(args: readonly string[]): Promise<void> {
     loadEnvFile(".env");
   }
 
-  if (args.length === 1 && args[0] === "--chat") {
+  const command = parseCliArguments(args);
+
+  if (command.mode === "chat") {
     await runInteractiveChat(
       createAgentSession(readConfig()),
       process.stdin,
@@ -21,12 +28,26 @@ async function main(args: readonly string[]): Promise<void> {
     return;
   }
 
-  const prompt = args.join(" ").trim();
-  if (!prompt) {
-    throw new Error('Usage: npm start -- "your prompt" or npm start -- --chat');
+  if (command.mode === "durable-chat") {
+    const durable = await createDurableAgentSession(
+      readConfig(),
+      command.threadId,
+      readPersistenceConfig().databasePath,
+    );
+    try {
+      await runInteractiveChat(
+        durable.session,
+        process.stdin,
+        process.stdout,
+        process.stderr,
+      );
+    } finally {
+      durable.close();
+    }
+    return;
   }
 
-  const answer = await generateText(prompt, readConfig());
+  const answer = await generateText(command.prompt, readConfig());
   process.stdout.write(`${answer}\n`);
 }
 

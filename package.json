@@ -12,7 +12,9 @@
     "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {
-    "@mistralai/mistralai": "^2.7.0",
+    "@langchain/core": "^1.2.17",
+    "@langchain/mistralai": "^1.2.0",
+    "langchain": "^1.5.16",
     "zod": "^4.6.5"
   },
   "devDependencies": {

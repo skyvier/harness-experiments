@@ -1,14 +1,24 @@
-import type {
-  ChatCompletionRequestTool,
-  FunctionTool,
-} from "@mistralai/mistralai/models/components";
 import { z } from "zod";
 
 type ToolResult = string | Promise<string>;
 
+/** Provider-independent function definition advertised to LangChain models. */
+export interface FunctionTool {
+  readonly type: "function";
+  readonly function: {
+    readonly name: string;
+    readonly description: string;
+    readonly strict: boolean;
+    readonly parameters: Record<string, unknown>;
+  };
+}
+
 const toolFailureSchema = z
   .object({
-    code: z.string().regex(/^[a-z][a-z0-9_]*$/).max(64),
+    code: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .max(64),
     message: z.string().min(1).max(200),
     retryable: z.boolean(),
   })
@@ -85,14 +95,12 @@ export function defineTool<
 
 /** A closed collection of tool definitions and their matching executors. */
 export interface ToolRegistry {
-  readonly definitions: readonly ChatCompletionRequestTool[];
+  readonly definitions: readonly FunctionTool[];
   execute(name: string, arguments_: unknown): Promise<ToolExecutionResult>;
 }
 
 /** Creates a registry and rejects ambiguous duplicate tool names. */
-export function createToolRegistry(
-  tools: readonly AgentTool[],
-): ToolRegistry {
+export function createToolRegistry(tools: readonly AgentTool[]): ToolRegistry {
   const toolsByName = new Map<string, AgentTool>();
 
   for (const tool of tools) {

@@ -1,10 +1,32 @@
-import { Mistral } from "@mistralai/mistralai";
+import { ChatMistralAI } from "@langchain/mistralai";
+import { z } from "zod";
 
 import { AgentSession } from "./agent.js";
-import type { AgentModel } from "./agent.js";
 import type { HarnessConfig } from "./config.js";
 
-/** Runs the agent loop using Mistral's EU-hosted inference endpoint. */
+/** Creates the LangChain provider adapter with the existing inference policy. */
+export function createMistralModel(config: HarnessConfig): ChatMistralAI {
+  return new ChatMistralAI({
+    apiKey: config.apiKey,
+    model: config.model,
+    serverURL: "https://api.eu.mistral.ai",
+    maxRetries: 0,
+    beforeRequestHooks: [
+      async (request) => {
+        // ChatMistralAI currently omits parallelToolCalls from its public options.
+        // Preserve our provider setting at the SDK's supported request hook.
+        const payload = z
+          .record(z.string(), z.unknown())
+          .parse(await request.clone().json());
+        return new Request(request, {
+          body: JSON.stringify({ ...payload, parallel_tool_calls: false }),
+        });
+      },
+    ],
+  });
+}
+
+/** Runs an isolated turn using Mistral's EU-hosted inference endpoint. */
 export async function generateText(
   prompt: string,
   config: HarnessConfig,
@@ -12,33 +34,9 @@ export async function generateText(
   return createAgentSession(config).send(prompt);
 }
 
-/** Creates a stateful agent session backed by Mistral inference. */
+/** Creates a stateful agent session backed by LangChain and Mistral. */
 export function createAgentSession(config: HarnessConfig): AgentSession {
-  const client = new Mistral({
-    apiKey: config.apiKey,
-    server: "eu",
-  });
-
-  const model: AgentModel = {
-    async complete(messages, tools) {
-      const response = await client.chat.complete({
-        model: config.model,
-        messages: [...messages],
-        tools: [...tools],
-        toolChoice: "auto",
-        parallelToolCalls: false,
-      });
-      const message = response?.choices?.[0]?.message;
-
-      if (!message) {
-        throw new Error("Mistral returned no assistant message.");
-      }
-
-      return message;
-    },
-  };
-
-  return new AgentSession(model, {
+  return new AgentSession(createMistralModel(config), {
     onToolCall: ({ name, arguments: arguments_, result, error }) => {
       const outcome =
         error === undefined

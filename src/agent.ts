@@ -1,9 +1,8 @@
-import type {
-  AssistantMessage,
-  AssistantMessageContent,
-  ChatCompletionRequestMessage,
-  ChatCompletionRequestTool,
-} from "@mistralai/mistralai/models/components";
+import { randomBytes } from "node:crypto";
+import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
+import type { BaseMessage } from "@langchain/core/messages";
+import { createAgent, createMiddleware } from "langchain";
 import { z } from "zod";
 
 import { calculatorAgentTool } from "./calculator.js";
@@ -20,6 +19,29 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 const MAX_STEPS = 5;
 const promptSchema = z.string().trim().min(1);
+const textContentSchema = z.union([
+  z.string(),
+  z.array(
+    z.object({ type: z.string(), text: z.string().optional() }).passthrough(),
+  ),
+]);
+const modelResponseSchema = z.object({
+  content: textContentSchema,
+  tool_calls: z.array(
+    z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      args: z.record(z.string(), z.unknown()),
+    }),
+  ),
+  invalid_tool_calls: z.array(
+    z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      args: z.string().nullable().optional(),
+    }),
+  ),
+});
 const DEFAULT_TOOL_REGISTRY = createToolRegistry([
   calculatorAgentTool,
   weatherAgentTool,
@@ -40,41 +62,152 @@ export interface AgentOptions {
   readonly toolRegistry?: ToolRegistry;
 }
 
-/** A stateful, in-memory conversation with atomic turn history. */
+/** LangChain model boundary; tests can supply a local BaseChatModel. */
+export type AgentModel = BaseChatModel;
+
+/** An in-memory conversation that commits only successfully completed turns. */
 export class AgentSession {
   readonly #model: AgentModel;
-  readonly #options: Required<Pick<AgentOptions, "maxSteps" | "toolRegistry">> &
-    Pick<AgentOptions, "onToolCall">;
-  #messages: readonly ChatCompletionRequestMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT },
-  ];
+  readonly #options: AgentOptions;
+  #messages: BaseMessage[] = [];
   #turnInProgress = false;
 
   constructor(model: AgentModel, options: AgentOptions = {}) {
     this.#model = model;
     this.#options = {
-      maxSteps: options.maxSteps ?? MAX_STEPS,
-      toolRegistry: options.toolRegistry ?? DEFAULT_TOOL_REGISTRY,
-      ...(options.onToolCall === undefined
-        ? {}
-        : { onToolCall: options.onToolCall }),
+      ...options,
+      maxSteps: z
+        .number()
+        .int()
+        .positive()
+        .parse(options.maxSteps ?? MAX_STEPS),
     };
   }
 
-  /** Completes one turn and commits its messages only after a final answer. */
   async send(prompt: string): Promise<string> {
     if (this.#turnInProgress) {
       throw new Error("An agent turn is already in progress.");
     }
-
     this.#turnInProgress = true;
     try {
-      const messages: ChatCompletionRequestMessage[] = [
+      const messages = [
         ...this.#messages,
-        { role: "user", content: promptSchema.parse(prompt) },
+        new HumanMessage(promptSchema.parse(prompt)),
       ];
-      const answer = await completeTurn(messages, this.#model, this.#options);
-      this.#messages = messages;
+      const {
+        maxSteps = MAX_STEPS,
+        onToolCall,
+        toolRegistry = DEFAULT_TOOL_REGISTRY,
+      } = this.#options;
+      let modelCalls = 0;
+      // LangGraph may schedule tools together. Preserve sequential execution.
+      let toolQueue: Promise<unknown> = Promise.resolve();
+      const rawArguments = new Map<string, unknown>();
+      const usedCallIds = new Set(
+        this.#messages.flatMap((message) =>
+          ToolMessage.isInstance(message) ? [message.tool_call_id] : [],
+        ),
+      );
+      let fatalToolError: Error | undefined;
+      const registerCall = (
+        call: { id: string; name: string; args: Record<string, unknown> },
+        arguments_: unknown,
+      ) => {
+        let id = call.id;
+        // LangGraph skips calls whose IDs already have a result in history.
+        // Preserve execution when a provider reuses an opaque call ID. Mistral
+        // accepts nine alphanumeric characters for replacement IDs.
+        while (usedCallIds.has(id))
+          id = randomBytes(5).toString("hex").slice(0, 9);
+        usedCallIds.add(id);
+        rawArguments.set(id, arguments_);
+        return { ...call, id };
+      };
+      const middleware = createMiddleware({
+        name: "HarnessBoundaries",
+        wrapModelCall: async (request, handler) => {
+          if (fatalToolError) throw fatalToolError;
+          if (modelCalls >= maxSteps) {
+            throw new Error(`Agent exceeded its ${maxSteps}-step limit.`);
+          }
+          modelCalls += 1;
+          const response = await handler({ ...request, toolChoice: "auto" });
+          if (!AIMessage.isInstance(response)) {
+            throw new Error("The model returned no assistant message.");
+          }
+          const parsed = modelResponseSchema.parse(response);
+          // LangChain separates malformed JSON calls from executable calls.
+          // Route them through our registry so the model gets a safe failure
+          // and can correct the call, rather than silently ending the turn.
+          return new AIMessage({
+            content: parsed.content,
+            tool_calls: [
+              ...parsed.tool_calls.map((call) => registerCall(call, call.args)),
+              ...parsed.invalid_tool_calls.map((call) =>
+                registerCall(
+                  { id: call.id, name: call.name, args: {} },
+                  call.args,
+                ),
+              ),
+            ],
+          });
+        },
+        wrapToolCall: (request) => {
+          const execution = toolQueue.then(async () => {
+            const { name, id } = request.toolCall;
+            if (!id)
+              throw new Error("The model returned a tool call without an id.");
+            const arguments_ = rawArguments.get(id);
+            const outcome = await toolRegistry.execute(name, arguments_);
+            const error = outcome.ok ? undefined : outcome.failure;
+            const result = outcome.ok
+              ? outcome.result
+              : JSON.stringify({ error });
+            onToolCall?.({
+              name,
+              arguments: arguments_,
+              result,
+              ...(error === undefined ? {} : { error }),
+            });
+            return new ToolMessage({ name, tool_call_id: id, content: result });
+          });
+          const guarded = execution.catch((error: unknown) => {
+            // ToolNode converts thrown errors into model-visible messages.
+            // Abort before the next model call, and never let it expose an
+            // observer failure or an unexpected registry exception verbatim.
+            fatalToolError =
+              error instanceof Error
+                ? error
+                : new Error("Tool execution failed.");
+            throw new Error("Tool execution failed.");
+          });
+          toolQueue = guarded;
+          return guarded;
+        },
+      });
+      const agent = createAgent({
+        model: this.#model,
+        systemPrompt: SYSTEM_PROMPT,
+        tools: toolRegistry.definitions.map((definition) => ({
+          ...definition,
+        })),
+        middleware: [middleware],
+      });
+      // Graph steps include middleware and tool nodes, so count model calls
+      // explicitly above rather than treating recursionLimit as maxSteps.
+      const result = await agent.invoke(
+        { messages },
+        { recursionLimit: maxSteps * 6 + 10 },
+      );
+      const lastMessage = result.messages.at(-1);
+      if (
+        !AIMessage.isInstance(lastMessage) ||
+        lastMessage.tool_calls?.length
+      ) {
+        throw new Error("The model returned no final answer.");
+      }
+      const answer = extractText(lastMessage.content);
+      this.#messages = result.messages;
       return answer;
     } finally {
       this.#turnInProgress = false;
@@ -82,97 +215,29 @@ export class AgentSession {
   }
 }
 
-/** Boundary implemented by an LLM provider adapter. */
-export interface AgentModel {
-  complete(
-    messages: readonly ChatCompletionRequestMessage[],
-    tools: readonly ChatCompletionRequestTool[],
-  ): Promise<AssistantMessage>;
-}
-
-/** Runs a bounded model/tool loop until the model produces a final answer. */
+/** Runs one isolated turn through LangChain's agent loop. */
 export async function runAgent(
   prompt: string,
   model: AgentModel,
   options: AgentOptions | number = {},
 ): Promise<string> {
-  const normalizedOptions =
-    typeof options === "number" ? { maxSteps: options } : options;
-  return new AgentSession(model, normalizedOptions).send(prompt);
+  return new AgentSession(
+    model,
+    typeof options === "number" ? { maxSteps: options } : options,
+  ).send(prompt);
 }
 
-async function completeTurn(
-  messages: ChatCompletionRequestMessage[],
-  model: AgentModel,
-  options: Required<Pick<AgentOptions, "maxSteps" | "toolRegistry">> &
-    Pick<AgentOptions, "onToolCall">,
-): Promise<string> {
-  const { maxSteps, onToolCall, toolRegistry } = options;
-
-  for (let step = 0; step < maxSteps; step += 1) {
-    const response = await model.complete(
-      [...messages],
-      toolRegistry.definitions,
-    );
-    const toolCalls = response.toolCalls ?? [];
-
-    if (toolCalls.length === 0) {
-      const answer = extractText(response.content);
-      messages.push({ ...response, role: "assistant" });
-      return answer;
-    }
-
-    messages.push({ ...response, role: "assistant" });
-
-    for (const toolCall of toolCalls) {
-      const toolCallId = toolCall.id;
-      if (!toolCallId) {
-        throw new Error("Mistral returned a tool call without an id.");
-      }
-
-      const execution = await toolRegistry.execute(
-        toolCall.function.name,
-        toolCall.function.arguments,
-      );
-      const error = execution.ok ? undefined : execution.failure;
-      const result = execution.ok
-        ? execution.result
-        : JSON.stringify({ error: execution.failure });
-
-      onToolCall?.({
-        name: toolCall.function.name,
-        arguments: toolCall.function.arguments,
-        result,
-        ...(error === undefined ? {} : { error }),
-      });
-
-      messages.push({
-        role: "tool",
-        name: toolCall.function.name,
-        toolCallId,
-        content: result,
-      });
-    }
-  }
-
-  throw new Error(`Agent exceeded its ${maxSteps}-step limit.`);
-}
-
-/** Extracts displayable text from content already validated by the model SDK. */
-export function extractText(
-  content: AssistantMessageContent | null | undefined,
-): string {
-  const text =
-    typeof content === "string"
-      ? content
-      : content
-          ?.filter((chunk) => chunk.type === "text")
-          .map((chunk) => chunk.text)
-          .join("") ?? "";
-
-  if (!text.trim()) {
-    throw new Error("Mistral returned no text content.");
-  }
-
+/** Validates and extracts displayable text from model content. */
+export function extractText(content: unknown): string {
+  const parsed = textContentSchema.safeParse(content);
+  const text = parsed.success
+    ? typeof parsed.data === "string"
+      ? parsed.data
+      : parsed.data
+          .filter((chunk) => chunk.type === "text")
+          .map((chunk) => chunk.text ?? "")
+          .join("")
+    : "";
+  if (!text.trim()) throw new Error("Mistral returned no text content.");
   return text;
 }

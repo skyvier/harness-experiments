@@ -47,6 +47,18 @@ npm start -- --chat
 Enter `/exit` to end the conversation. Completed turns remain in context for
 the rest of the process; failed turns are discarded from conversation history.
 
+Resume a named conversation across process restarts with:
+
+```sh
+npm start -- --chat --thread my-project
+```
+
+Thread IDs may contain letters, numbers, dots, underscores, and hyphens. Durable
+threads are stored in `.harness/conversations.sqlite`, which is ignored by Git.
+Set `HARNESS_DB_PATH` to use another location. Different thread IDs have isolated
+histories, and a failed turn is rolled back before the process accepts another
+turn or exits.
+
 Executed tool calls are logged to stderr, while the final answer is written to
 stdout.
 
@@ -57,8 +69,9 @@ npm test
 npm run check
 ```
 
-The prototype is intentionally stateless between CLI invocations. Within an
-invocation, each user turn runs a bounded five-step agent loop and exposes
+One-shot prompts and plain `--chat` sessions remain stateless between CLI
+invocations; named threads opt into local persistence. Each user turn runs a
+bounded five-step agent loop and exposes
 allowlisted calculator and current-weather tools. Weather observations come
 from the [Finnish Meteorological Institute's open data](https://en.ilmatieteenlaitos.fi/open-data)
 under its stated Creative Commons licence. FMI responses are validated before
@@ -74,9 +87,10 @@ The harness now uses TypeScript's `createAgent` from `langchain`, backed by
 LangGraph, and `ChatMistralAI` from `@langchain/mistralai`. The terminal commands,
 calculator, FMI adapter, and model-safe tool failure format stay the same.
 
-- `src/agent.ts` wraps the framework in `AgentSession`. Each turn passes the
-  completed conversation into a fresh graph invocation; history is committed
-  only after a nonempty final answer. Failed turns never enter later context.
+- `src/agent.ts` wraps the framework in `AgentSession`. In-memory sessions pass
+  completed history into each graph invocation. Durable sessions let LangGraph
+  restore the named thread from SQLite. In both modes, history is committed only
+  after a nonempty final answer, so failed turns never enter later context.
 - The `HarnessBoundaries` middleware counts model calls (five per turn by
   default), validates model output with Zod, and dispatches tool calls through
   the existing validated registry. It deliberately handles unknown tools and
@@ -98,5 +112,8 @@ Tests exercise the real framework graph with a scripted model and verify the
 Mistral HTTP boundary with mocked streaming responses; no API key or live
 inference is needed for the test suite.
 
-Sessions are still in-memory. This migration introduces no durable checkpoints,
-external tracing service, or persistent memory.
+Named sessions use LangGraph's SQLite checkpointer. Each turn runs inside a
+database transaction so model failures, tool failures, and invalid final answers
+cannot leave partial checkpoints. Restored message state is validated with Zod
+before it reaches the model. The project still has no external tracing service
+or long-term memory shared across threads.

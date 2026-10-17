@@ -2,7 +2,9 @@ import { ChatMistralAI } from "@langchain/mistralai";
 import { z } from "zod";
 
 import { AgentSession } from "./agent.js";
+import type { ToolCallEvent } from "./agent.js";
 import type { HarnessConfig } from "./config.js";
+import { openSqliteAgentPersistence } from "./persistence.js";
 
 /** Creates the LangChain provider adapter with the existing inference policy. */
 export function createMistralModel(config: HarnessConfig): ChatMistralAI {
@@ -37,14 +39,43 @@ export async function generateText(
 /** Creates a stateful agent session backed by LangChain and Mistral. */
 export function createAgentSession(config: HarnessConfig): AgentSession {
   return new AgentSession(createMistralModel(config), {
-    onToolCall: ({ name, arguments: arguments_, result, error }) => {
-      const outcome =
-        error === undefined
-          ? `-> ${result}`
-          : `failed [${error.code}]: ${error.message}`;
-      process.stderr.write(
-        `[tool] ${name} ${JSON.stringify(arguments_)} ${outcome}\n`,
-      );
-    },
+    onToolCall: logToolCall,
   });
+}
+
+/** A persistent session and its owned SQLite connection. */
+export interface DurableAgentSession {
+  readonly session: AgentSession;
+  close(): void;
+}
+
+/** Creates a session whose LangGraph state survives process restarts. */
+export async function createDurableAgentSession(
+  config: HarnessConfig,
+  threadId: string,
+  databasePath: string,
+): Promise<DurableAgentSession> {
+  const persistence = await openSqliteAgentPersistence(databasePath, threadId);
+  return {
+    session: new AgentSession(createMistralModel(config), {
+      persistence,
+      onToolCall: logToolCall,
+    }),
+    close: () => persistence.close(),
+  };
+}
+
+function logToolCall({
+  name,
+  arguments: arguments_,
+  result,
+  error,
+}: ToolCallEvent): void {
+  const outcome =
+    error === undefined
+      ? `-> ${result}`
+      : `failed [${error.code}]: ${error.message}`;
+  process.stderr.write(
+    `[tool] ${name} ${JSON.stringify(arguments_)} ${outcome}\n`,
+  );
 }

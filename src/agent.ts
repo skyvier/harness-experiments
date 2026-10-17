@@ -1,6 +1,11 @@
 import { randomBytes } from "node:crypto";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
+import {
+  AIMessage,
+  HumanMessage,
+  ToolMessage,
+  isBaseMessage,
+} from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
 import { createAgent, createMiddleware } from "langchain";
 import { z } from "zod";
@@ -9,6 +14,7 @@ import { calculatorAgentTool } from "./calculator.js";
 import { createToolRegistry } from "./tool.js";
 import type { ToolFailure, ToolRegistry } from "./tool.js";
 import { weatherAgentTool } from "./weather.js";
+import type { AgentPersistence } from "./persistence.js";
 
 const SYSTEM_PROMPT = [
   "You are a concise, helpful assistant.",
@@ -42,6 +48,22 @@ const modelResponseSchema = z.object({
     }),
   ),
 });
+const restoredMessageSchema = z
+  .custom<BaseMessage>(isBaseMessage)
+  .superRefine((message, context) => {
+    if (!["human", "ai", "tool", "system"].includes(message.getType())) {
+      context.addIssue({
+        code: "custom",
+        message: `Unsupported persisted message type: ${message.getType()}`,
+      });
+    }
+    if (!textContentSchema.safeParse(message.content).success) {
+      context.addIssue({
+        code: "custom",
+        message: "Invalid persisted message content.",
+      });
+    }
+  });
 const DEFAULT_TOOL_REGISTRY = createToolRegistry([
   calculatorAgentTool,
   weatherAgentTool,
@@ -60,6 +82,7 @@ export interface AgentOptions {
   readonly maxSteps?: number;
   readonly onToolCall?: (event: ToolCallEvent) => void;
   readonly toolRegistry?: ToolRegistry;
+  readonly persistence?: AgentPersistence;
 }
 
 /** LangChain model boundary; tests can supply a local BaseChatModel. */
@@ -90,14 +113,15 @@ export class AgentSession {
     }
     this.#turnInProgress = true;
     try {
-      const messages = [
-        ...this.#messages,
-        new HumanMessage(promptSchema.parse(prompt)),
-      ];
+      const humanMessage = new HumanMessage(promptSchema.parse(prompt));
+      const messages = this.#options.persistence
+        ? [humanMessage]
+        : [...this.#messages, humanMessage];
       const {
         maxSteps = MAX_STEPS,
         onToolCall,
         toolRegistry = DEFAULT_TOOL_REGISTRY,
+        persistence,
       } = this.#options;
       let modelCalls = 0;
       // LangGraph may schedule tools together. Preserve sequential execution.
@@ -125,6 +149,9 @@ export class AgentSession {
       };
       const middleware = createMiddleware({
         name: "HarnessBoundaries",
+        beforeAgent: (state) => {
+          validateConversationMessages(state.messages);
+        },
         wrapModelCall: async (request, handler) => {
           if (fatalToolError) throw fatalToolError;
           if (modelCalls >= maxSteps) {
@@ -136,6 +163,11 @@ export class AgentSession {
             throw new Error("The model returned no assistant message.");
           }
           const parsed = modelResponseSchema.parse(response);
+          for (const message of request.state.messages) {
+            if (ToolMessage.isInstance(message)) {
+              usedCallIds.add(message.tool_call_id);
+            }
+          }
           // LangChain separates malformed JSON calls from executable calls.
           // Route them through our registry so the model gets a safe failure
           // and can correct the call, rather than silently ending the turn.
@@ -192,27 +224,46 @@ export class AgentSession {
           ...definition,
         })),
         middleware: [middleware],
+        ...(persistence === undefined
+          ? {}
+          : { checkpointer: persistence.checkpointer }),
       });
       // Graph steps include middleware and tool nodes, so count model calls
       // explicitly above rather than treating recursionLimit as maxSteps.
-      const result = await agent.invoke(
-        { messages },
-        { recursionLimit: maxSteps * 6 + 10 },
-      );
-      const lastMessage = result.messages.at(-1);
-      if (
-        !AIMessage.isInstance(lastMessage) ||
-        lastMessage.tool_calls?.length
-      ) {
-        throw new Error("The model returned no final answer.");
-      }
-      const answer = extractText(lastMessage.content);
-      this.#messages = result.messages;
-      return answer;
+      const completeTurn = async (): Promise<string> => {
+        const result = await agent.invoke(
+          { messages },
+          {
+            recursionLimit: maxSteps * 6 + 10,
+            ...(persistence === undefined
+              ? {}
+              : { configurable: { thread_id: persistence.threadId } }),
+          },
+        );
+        const lastMessage = result.messages.at(-1);
+        if (
+          !AIMessage.isInstance(lastMessage) ||
+          lastMessage.tool_calls?.length
+        ) {
+          throw new Error("The model returned no final answer.");
+        }
+        const answer = extractText(lastMessage.content);
+        if (persistence === undefined) this.#messages = result.messages;
+        return answer;
+      };
+
+      return persistence === undefined
+        ? await completeTurn()
+        : await persistence.transaction(completeTurn);
     } finally {
       this.#turnInProgress = false;
     }
   }
+}
+
+/** Validates messages restored from an external checkpoint before model use. */
+export function validateConversationMessages(messages: unknown): BaseMessage[] {
+  return z.array(restoredMessageSchema).parse(messages);
 }
 
 /** Runs one isolated turn through LangChain's agent loop. */

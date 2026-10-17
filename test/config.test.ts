@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { readConfig } from "../src/config.js";
+import { readConfig, readPersistenceConfig } from "../src/config.js";
 
 describe("readConfig", () => {
   it("uses the cheap Ministral model by default", () => {
@@ -23,5 +23,23 @@ describe("readConfig", () => {
       }).model,
       "mistral-small-latest",
     );
+  });
+});
+
+describe("readPersistenceConfig", () => {
+  it("uses a local ignored database by default", () => {
+    assert.deepEqual(readPersistenceConfig({}), {
+      databasePath: ".harness/conversations.sqlite",
+    });
+  });
+
+  it("validates an explicit database path", () => {
+    assert.deepEqual(
+      readPersistenceConfig({ HARNESS_DB_PATH: " /tmp/chat.db " }),
+      {
+        databasePath: "/tmp/chat.db",
+      },
+    );
+    assert.throws(() => readPersistenceConfig({ HARNESS_DB_PATH: " " }));
   });
 });

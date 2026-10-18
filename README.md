@@ -38,6 +38,15 @@ npm start -- "Explain what an AI harness is in two sentences."
 npm start -- "What is the weather at latitude 60.17 and longitude 24.94?"
 ```
 
+Start an in-memory interactive conversation with:
+
+```sh
+npm start -- --chat
+```
+
+Enter `/exit` to end the conversation. Completed turns remain in context for
+the rest of the process; failed turns are discarded from conversation history.
+
 Executed tool calls are logged to stderr, while the final answer is written to
 stdout.
 
@@ -48,13 +57,13 @@ npm test
 npm run check
 ```
 
-The prototype is intentionally stateless between CLI invocations. Within one
-invocation, it runs a bounded five-step agent loop and exposes allowlisted
-calculator and current-weather tools. Weather observations come from the
-[Finnish Meteorological Institute's open data](https://en.ilmatieteenlaitos.fi/open-data)
+The prototype is intentionally stateless between CLI invocations. Within an
+invocation, each user turn runs a bounded five-step agent loop and exposes
+allowlisted calculator and current-weather tools. Weather observations come
+from the [Finnish Meteorological Institute's open data](https://en.ilmatieteenlaitos.fi/open-data)
 under its stated Creative Commons licence. FMI responses are validated before
-they enter application logic, and only normalized numeric observations are sent
-to the model. Validation and execution failures are returned to the model as
-tool results, allowing it to explain the failure or retry with a corrected call.
-Tools may map recognized failures to safe descriptions; all other exceptions
-are replaced with a generic error before entering the model context.
+they enter application logic, and only normalized numeric observations are
+sent to the model. Validation and execution failures are returned to the model
+as tool results, allowing it to explain the failure or retry with a corrected
+call. Tools may map recognized failures to safe descriptions; all other
+exceptions are replaced with a generic error before entering the model context.

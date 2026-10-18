@@ -4,6 +4,7 @@ import type {
   ChatCompletionRequestMessage,
   ChatCompletionRequestTool,
 } from "@mistralai/mistralai/models/components";
+import { z } from "zod";
 
 import { calculatorAgentTool } from "./calculator.js";
 import { createToolRegistry } from "./tool.js";
@@ -18,6 +19,7 @@ const SYSTEM_PROMPT = [
   "State uncertainty instead of inventing facts.",
 ].join(" ");
 const MAX_STEPS = 5;
+const promptSchema = z.string().trim().min(1);
 const DEFAULT_TOOL_REGISTRY = createToolRegistry([
   calculatorAgentTool,
   weatherAgentTool,
@@ -31,11 +33,53 @@ export interface ToolCallEvent {
   readonly error?: ToolFailure;
 }
 
-/** Optional controls for one agent-loop invocation. */
+/** Optional controls applied to every turn in an agent session. */
 export interface AgentOptions {
   readonly maxSteps?: number;
   readonly onToolCall?: (event: ToolCallEvent) => void;
   readonly toolRegistry?: ToolRegistry;
+}
+
+/** A stateful, in-memory conversation with atomic turn history. */
+export class AgentSession {
+  readonly #model: AgentModel;
+  readonly #options: Required<Pick<AgentOptions, "maxSteps" | "toolRegistry">> &
+    Pick<AgentOptions, "onToolCall">;
+  #messages: readonly ChatCompletionRequestMessage[] = [
+    { role: "system", content: SYSTEM_PROMPT },
+  ];
+  #turnInProgress = false;
+
+  constructor(model: AgentModel, options: AgentOptions = {}) {
+    this.#model = model;
+    this.#options = {
+      maxSteps: options.maxSteps ?? MAX_STEPS,
+      toolRegistry: options.toolRegistry ?? DEFAULT_TOOL_REGISTRY,
+      ...(options.onToolCall === undefined
+        ? {}
+        : { onToolCall: options.onToolCall }),
+    };
+  }
+
+  /** Completes one turn and commits its messages only after a final answer. */
+  async send(prompt: string): Promise<string> {
+    if (this.#turnInProgress) {
+      throw new Error("An agent turn is already in progress.");
+    }
+
+    this.#turnInProgress = true;
+    try {
+      const messages: ChatCompletionRequestMessage[] = [
+        ...this.#messages,
+        { role: "user", content: promptSchema.parse(prompt) },
+      ];
+      const answer = await completeTurn(messages, this.#model, this.#options);
+      this.#messages = messages;
+      return answer;
+    } finally {
+      this.#turnInProgress = false;
+    }
+  }
 }
 
 /** Boundary implemented by an LLM provider adapter. */
@@ -54,22 +98,28 @@ export async function runAgent(
 ): Promise<string> {
   const normalizedOptions =
     typeof options === "number" ? { maxSteps: options } : options;
-  const {
-    maxSteps = MAX_STEPS,
-    onToolCall,
-    toolRegistry = DEFAULT_TOOL_REGISTRY,
-  } = normalizedOptions;
-  const messages: ChatCompletionRequestMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: prompt },
-  ];
+  return new AgentSession(model, normalizedOptions).send(prompt);
+}
+
+async function completeTurn(
+  messages: ChatCompletionRequestMessage[],
+  model: AgentModel,
+  options: Required<Pick<AgentOptions, "maxSteps" | "toolRegistry">> &
+    Pick<AgentOptions, "onToolCall">,
+): Promise<string> {
+  const { maxSteps, onToolCall, toolRegistry } = options;
 
   for (let step = 0; step < maxSteps; step += 1) {
-    const response = await model.complete(messages, toolRegistry.definitions);
+    const response = await model.complete(
+      [...messages],
+      toolRegistry.definitions,
+    );
     const toolCalls = response.toolCalls ?? [];
 
     if (toolCalls.length === 0) {
-      return extractText(response.content);
+      const answer = extractText(response.content);
+      messages.push({ ...response, role: "assistant" });
+      return answer;
     }
 
     messages.push({ ...response, role: "assistant" });
